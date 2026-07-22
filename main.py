@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from asr_module import ASRResult, transcribe_video
 from config import AppSettings, load_config
@@ -28,9 +29,32 @@ from utils import (
 from video_renderer import render_video
 
 
-def _artifact_prefix(video_path: Path) -> str:
+LOGGER = logging.getLogger("reframe")
+
+
+def _artifact_prefix(video_path: Path, source_sha256: str) -> str:
     stem = safe_filename(video_path.stem, "video")
-    return f"{stem}_{sha256_file(video_path)[:8]}"
+    return f"{stem}_{source_sha256[:8]}"
+
+
+def _publish_artifacts(pairs: Sequence[Tuple[Path, Path]]) -> None:
+    backups: List[Tuple[Path, Path]] = []
+    published: List[Path] = []
+    try:
+        for staged, final in pairs:
+            if final.exists():
+                backup = staged.parent / f"{final.name}.previous"
+                final.replace(backup)
+                backups.append((backup, final))
+        for staged, final in pairs:
+            staged.replace(final)
+            published.append(final)
+    except Exception:
+        cleanup_paths(published)
+        for backup, final in backups:
+            if backup.exists():
+                backup.replace(final)
+        raise
 
 
 def process_video(
@@ -50,7 +74,8 @@ def process_video(
     if not video_path.exists():
         raise PipelineError(f"输入视频不存在：{video_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    prefix = _artifact_prefix(video_path)
+    source_sha256 = sha256_file(video_path)
+    prefix = _artifact_prefix(video_path, source_sha256)
     output_path = output_dir / f"{prefix}_reconstructed.mp4"
     manifest_path = output_dir / f"{prefix}_manifest.json"
     transcript_path = output_dir / f"{prefix}_transcript.json"
@@ -61,9 +86,12 @@ def process_video(
     work_root = output_dir / ".reframe-work"
     work_root.mkdir(parents=True, exist_ok=True)
     work_dir = Path(tempfile.mkdtemp(prefix=f"{prefix}-", dir=str(work_root)))
-    input_metadata = probe_video(video_path)
-    created_paths = [output_path, manifest_path, transcript_path, script_path]
+    staged_output = work_dir / output_path.name
+    staged_manifest = work_dir / manifest_path.name
+    staged_transcript = work_dir / transcript_path.name
+    staged_script = work_dir / script_path.name
     try:
+        input_metadata = probe_video(video_path)
         emit_progress(progress, 5, "提取音频并执行 ASR")
         if skip_asr:
             text = settings.asr.default_text.strip()
@@ -77,7 +105,9 @@ def process_video(
             )
         else:
             asr_result = transcribe_video(video_path, work_dir, settings.asr)
-        write_json(transcript_path, asr_result.to_dict())
+        write_json(staged_transcript, asr_result.to_dict())
+        if asr_result.warning:
+            LOGGER.warning("ASR：%s", asr_result.warning)
 
         emit_progress(progress, 35, "重构短视频解说词")
         if skip_llm:
@@ -92,7 +122,9 @@ def process_video(
                 settings.llm,
                 target_seconds=input_metadata["duration"],
             )
-        script_path.write_text(rewrite_result.text, encoding="utf-8")
+        staged_script.write_text(rewrite_result.text, encoding="utf-8")
+        if rewrite_result.warning:
+            LOGGER.warning("LLM：%s", rewrite_result.warning)
 
         emit_progress(progress, 55, "生成全新旁白音轨")
         if skip_tts:
@@ -107,24 +139,36 @@ def process_video(
                 work_dir / "narration.mp3",
                 settings.tts,
             )
+        if tts_result.warning:
+            LOGGER.warning("TTS：%s", tts_result.warning)
 
         emit_progress(progress, 70, "重构画面并替换原音")
+        render_settings = replace(
+            settings.render,
+            handler_video=(
+                settings.metadata.handler_description
+                if settings.metadata.enabled
+                else settings.render.handler_video
+            ),
+        )
         render_result = render_video(
             video_path,
             tts_result.audio_path,
-            output_path,
-            settings.render,
+            staged_output,
+            render_settings,
         )
 
         emit_progress(progress, 92, "写入并回读视频元数据")
-        metadata_result = inject_metadata(output_path, settings.metadata)
-        final_metadata = probe_video(output_path)
+        metadata_result = inject_metadata(staged_output, settings.metadata)
+        if metadata_result.warning:
+            LOGGER.warning("元数据：%s", metadata_result.warning)
+        final_metadata = probe_video(staged_output)
         manifest = {
             "schema_version": "reframe-narration-v1",
             "input": {
                 "file": video_path.name,
                 "path": str(video_path),
-                "sha256": sha256_file(video_path),
+                "sha256": source_sha256,
                 **input_metadata,
             },
             "settings": settings.public_dict(),
@@ -136,7 +180,7 @@ def process_video(
             "output": {
                 "file": output_path.name,
                 "path": str(output_path),
-                "sha256": sha256_file(output_path),
+                "sha256": sha256_file(staged_output),
                 **final_metadata,
             },
             "artifacts": {
@@ -146,7 +190,15 @@ def process_video(
                 "temp_dir": str(work_dir) if keep_temp else None,
             },
         }
-        write_json(manifest_path, manifest)
+        write_json(staged_manifest, manifest)
+        _publish_artifacts(
+            [
+                (staged_output, output_path),
+                (staged_transcript, transcript_path),
+                (staged_script, script_path),
+                (staged_manifest, manifest_path),
+            ]
+        )
         emit_progress(progress, 100, "处理完成")
         return {
             "status": "completed",
@@ -160,9 +212,6 @@ def process_video(
             "tts_mode": tts_result.mode,
             "metadata_mode": metadata_result.mode,
         }
-    except Exception:
-        cleanup_paths(created_paths)
-        raise
     finally:
         if not keep_temp:
             cleanup_paths([work_dir])

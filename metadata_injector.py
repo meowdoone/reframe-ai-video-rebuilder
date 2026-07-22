@@ -106,6 +106,33 @@ def inject_metadata(
         values = json.loads(read_result.stdout or "[]")
         readback = values[0] if values else {}
         readback.pop("SourceFile", None)
+        expected = {
+            "Keys:Make": settings.make,
+            "Keys:Model": settings.model,
+            "Keys:Software": settings.software,
+            "QuickTime:CreateDate": timestamp,
+            "QuickTime:ModifyDate": timestamp,
+        }
+        mismatches = [
+            key
+            for key, expected_value in expected.items()
+            if str(readback.get(key) or "") != str(expected_value)
+        ]
+        handler_values = [
+            str(value)
+            for key, value in readback.items()
+            if key.endswith(":HandlerDescription")
+        ]
+        if settings.handler_description not in handler_values:
+            mismatches.append("HandlerDescription")
+        if mismatches:
+            return MetadataResult(
+                applied=False,
+                mode="partial",
+                requested=requested,
+                readback=readback,
+                warning="元数据回读不一致：" + ", ".join(mismatches),
+            )
         return MetadataResult(
             applied=True,
             mode="exiftool",

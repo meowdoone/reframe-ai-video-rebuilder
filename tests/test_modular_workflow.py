@@ -95,7 +95,13 @@ class ConfigAndFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             video = Path(tmp) / "output.mp4"
             video.write_bytes(b"placeholder")
-            with patch("metadata_injector.shutil.which", return_value=None):
+            original_which = shutil.which
+            with patch(
+                "metadata_injector.shutil.which",
+                side_effect=lambda name: (
+                    None if name == "exiftool" else original_which(name)
+                ),
+            ):
                 result = inject_metadata(
                     video,
                     MetadataSettings(enabled=True, make="Apple", model="iPhone 15 Pro"),
@@ -260,6 +266,198 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(manifest["output"]["width"], 360)
         self.assertEqual(manifest["output"]["height"], 640)
         self.assertEqual(manifest["output"]["audio_codec"], "aac")
+
+    def test_failed_overwrite_preserves_previous_completed_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.mp4"
+            subprocess.run(
+                [
+                    shutil.which("ffmpeg"),
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=blue:size=160x90:rate=24:duration=0.8",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(source),
+                ],
+                check=True,
+            )
+            settings = AppSettings(
+                asr=ASRSettings(default_text="测试"),
+                llm=LLMSettings(api_key=None),
+                render=RenderSettings(
+                    width=180,
+                    height=320,
+                    preset="ultrafast",
+                    crf=30,
+                ),
+                metadata=MetadataSettings(enabled=False),
+            )
+            first = process_video(
+                source,
+                root / "outputs",
+                settings,
+                skip_asr=True,
+                skip_tts=True,
+            )
+            output = Path(first["video"])
+            previous = output.read_bytes()
+
+            with patch("main.render_video", side_effect=RuntimeError("render failed")):
+                with self.assertRaises(RuntimeError):
+                    process_video(
+                        source,
+                        root / "outputs",
+                        settings,
+                        skip_asr=True,
+                        skip_tts=True,
+                        overwrite=True,
+                    )
+
+            self.assertTrue(output.exists())
+            self.assertEqual(output.read_bytes(), previous)
+
+    def test_invalid_video_does_not_leave_temporary_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "invalid.mp4"
+            source.write_bytes(b"invalid video")
+            output_dir = root / "outputs"
+
+            with self.assertRaises(Exception):
+                process_video(
+                    source,
+                    output_dir,
+                    AppSettings(metadata=MetadataSettings(enabled=False)),
+                )
+
+            self.assertFalse((output_dir / ".reframe-work").exists())
+
+    @unittest.skipUnless(shutil.which("exiftool"), "ExifTool required")
+    def test_custom_handler_and_phone_fields_are_verified_by_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "metadata-source.mp4"
+            subprocess.run(
+                [
+                    shutil.which("ffmpeg"),
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=green:size=160x90:rate=24:duration=0.8",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(source),
+                ],
+                check=True,
+            )
+            settings = AppSettings(
+                asr=ASRSettings(default_text="测试"),
+                llm=LLMSettings(api_key=None),
+                render=RenderSettings(
+                    width=180,
+                    height=320,
+                    preset="ultrafast",
+                    crf=30,
+                ),
+                metadata=MetadataSettings(
+                    enabled=True,
+                    make="Xiaomi",
+                    model="Xiaomi 14 Pro",
+                    software="HyperOS 2",
+                    handler_description="Custom Core Media Video",
+                ),
+            )
+
+            result = process_video(
+                source,
+                root / "outputs",
+                settings,
+                skip_asr=True,
+                skip_tts=True,
+            )
+            manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+            readback = manifest["metadata"]["readback"]
+
+        self.assertTrue(manifest["metadata"]["applied"])
+        self.assertEqual(readback["Keys:Make"], "Xiaomi")
+        self.assertEqual(readback["Keys:Model"], "Xiaomi 14 Pro")
+        self.assertIn(
+            "Custom Core Media Video",
+            [
+                value
+                for key, value in readback.items()
+                if key.endswith(":HandlerDescription")
+            ],
+        )
+
+    def test_missing_exiftool_warning_is_emitted_by_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "warning-source.mp4"
+            subprocess.run(
+                [
+                    shutil.which("ffmpeg"),
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=red:size=160x90:rate=24:duration=0.6",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(source),
+                ],
+                check=True,
+            )
+            settings = AppSettings(
+                asr=ASRSettings(default_text="测试"),
+                llm=LLMSettings(api_key=None),
+                render=RenderSettings(
+                    width=180,
+                    height=320,
+                    preset="ultrafast",
+                    crf=30,
+                ),
+                metadata=MetadataSettings(enabled=True),
+            )
+
+            original_which = shutil.which
+            with patch(
+                "metadata_injector.shutil.which",
+                side_effect=lambda name: (
+                    None if name == "exiftool" else original_which(name)
+                ),
+            ):
+                with self.assertLogs("reframe", level="WARNING") as captured:
+                    result = process_video(
+                        source,
+                        root / "outputs",
+                        settings,
+                        skip_asr=True,
+                        skip_tts=True,
+                    )
+
+        self.assertEqual(result["metadata_mode"], "skipped")
+        self.assertIn("ExifTool", "\n".join(captured.output))
 
 
 if __name__ == "__main__":
