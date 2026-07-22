@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2220%22 fill=%22%2311130f%22/><path d=%22M21 24h38c14 0 22 7 22 18 0 9-5 15-14 18l17 16H65L51 63H39v13H21V24zm18 14v12h18c4 0 7-2 7-6s-3-6-7-6H39z%22 fill=%22%23d7ff3f%22/></svg>">
+  <title>RE:FRAME — AI 视频重构器</title>
+  <style>
+    :root {
+      --ink: #11130f;
+      --panel: #191c17;
+      --panel-2: #22271f;
+      --paper: #f2f0e8;
+      --muted: #a4aa9d;
+      --acid: #d7ff3f;
+      --orange: #ff6b3d;
+      --line: rgba(242, 240, 232, .18);
+      --radius: 18px;
+      --ease: cubic-bezier(.2, .8, .2, 1);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--paper);
+      background:
+        radial-gradient(circle at 88% 4%, rgba(215, 255, 63, .11), transparent 25rem),
+        radial-gradient(circle at 8% 95%, rgba(255, 107, 61, .1), transparent 30rem),
+        var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      min-height: 100vh;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .16;
+      background: repeating-linear-gradient(135deg, transparent 0 7px, rgba(255,255,255,.055) 7px 8px);
+      mask-image: linear-gradient(to bottom, #000, transparent 80%);
+    }
+
+    .skip-link {
+      position: fixed;
+      left: 16px;
+      top: -60px;
+      z-index: 99;
+      padding: 10px 14px;
+      background: var(--acid);
+      color: var(--ink);
+    }
+    .skip-link:focus { top: 16px; }
+
+    .shell { width: min(1440px, calc(100% - 32px)); margin: 0 auto; }
+
+    header {
+      min-height: 86px;
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      align-items: center;
+      gap: 22px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      font-family: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+      font-size: clamp(24px, 3vw, 40px);
+      letter-spacing: .025em;
+      line-height: 1;
+    }
+    .brand span { color: var(--acid); }
+    .header-meta, .badge { font: 700 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
+    .header-meta { color: var(--muted); }
+    .badge {
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 12px var(--acid); }
+    .badge.offline::before { background: var(--orange); box-shadow: none; }
+
+    main { padding: 46px 0 76px; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(360px, .85fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .kicker { display: flex; align-items: center; gap: 12px; color: var(--acid); font: 700 12px ui-monospace, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; }
+    .kicker::before { content: "01"; color: var(--ink); background: var(--acid); padding: 6px 7px; }
+    h1 {
+      margin: 19px 0 15px;
+      max-width: 870px;
+      font-family: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+      font-weight: 900;
+      font-size: clamp(54px, 8vw, 112px);
+      line-height: .86;
+      letter-spacing: -.025em;
+      text-transform: uppercase;
+    }
+    h1 em { color: transparent; -webkit-text-stroke: 1.5px var(--paper); font-style: normal; }
+    .lede { max-width: 720px; margin: 0 0 30px; color: var(--muted); font-size: clamp(15px, 1.5vw, 19px); line-height: 1.65; }
+
+    .panel {
+      position: relative;
+      background: linear-gradient(160deg, rgba(255,255,255,.035), transparent 40%), var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 24px 80px rgba(0,0,0,.32);
+      overflow: hidden;
+    }
+    .panel::after {
+      content: "";
+      position: absolute;
+      width: 16px; height: 16px;
+      top: -1px; right: -1px;
+      border-top: 2px solid var(--acid);
+      border-right: 2px solid var(--acid);
+    }
+    .panel-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      min-height: 58px;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--line);
+      font: 700 12px ui-monospace, Menlo, monospace;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .panel-title strong { color: var(--paper); }
+    .form-body { padding: 20px; }
+
+    .dropzone {
+      position: relative;
+      min-height: 180px;
+      border: 1.5px dashed rgba(215,255,63,.48);
+      background: repeating-linear-gradient(135deg, rgba(215,255,63,.025) 0 9px, transparent 9px 18px);
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      cursor: pointer;
+      transition: transform 220ms var(--ease), border-color 220ms var(--ease), background 220ms var(--ease);
+    }
+    .dropzone:hover, .dropzone.dragging { transform: translateY(-2px); border-color: var(--acid); background-color: rgba(215,255,63,.05); }
+    .dropzone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .drop-icon { width: 48px; height: 48px; margin: 0 auto 13px; border: 1px solid var(--acid); border-radius: 50%; display: grid; place-items: center; color: var(--acid); font-size: 24px; }
+    .dropzone strong { display: block; font-size: 17px; margin-bottom: 7px; }
+    .dropzone small { color: var(--muted); }
+
+    .file-list { display: grid; gap: 7px; margin-top: 10px; }
+    .file-chip { padding: 9px 11px; display: flex; justify-content: space-between; gap: 12px; background: var(--panel-2); border-radius: 8px; color: var(--muted); font-size: 12px; }
+    .file-chip span:first-child { color: var(--paper); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
+    .field.full { grid-column: 1 / -1; }
+    label { display: block; margin: 0 0 8px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .04em; }
+    input[type="text"], input[type="number"], select, textarea, .file-button {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      color: var(--paper);
+      background: #11140f;
+      font: inherit;
+      outline: none;
+      transition: border-color 180ms ease, box-shadow 180ms ease;
+    }
+    input[type="text"], input[type="number"], select { height: 48px; padding: 0 13px; }
+    textarea { min-height: 118px; padding: 13px; resize: vertical; line-height: 1.55; }
+    input:focus, select:focus, textarea:focus { border-color: var(--acid); box-shadow: 0 0 0 3px rgba(215,255,63,.1); }
+    select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--acid) 50%), linear-gradient(135deg, var(--acid) 50%, transparent 50%); background-position: calc(100% - 17px) 21px, calc(100% - 12px) 21px; background-size: 5px 5px; background-repeat: no-repeat; }
+
+    .music-input { display: flex; align-items: center; min-height: 48px; padding: 9px 11px; position: relative; overflow: hidden; }
+    .music-input input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .music-input span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; background: #11140f; }
+    .toggle-row label { margin: 0; color: var(--paper); }
+    .switch { position: relative; width: 44px; height: 24px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; inset: 0; background: #444a40; border-radius: 99px; transition: .2s; cursor: pointer; }
+    .slider::before { content: ""; position: absolute; width: 18px; height: 18px; top: 3px; left: 3px; background: white; border-radius: 50%; transition: .2s; }
+    .switch input:checked + .slider { background: var(--acid); }
+    .switch input:checked + .slider::before { transform: translateX(20px); background: var(--ink); }
+
+    .submit {
+      width: 100%; min-height: 58px; margin-top: 18px; border: 0; border-radius: 10px; background: var(--acid); color: var(--ink); cursor: pointer;
+      font: 900 15px ui-monospace, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase;
+      box-shadow: 0 14px 34px rgba(215,255,63,.13);
+      transition: transform 220ms var(--ease), box-shadow 220ms var(--ease), opacity 220ms;
+    }
+    .submit:hover { transform: translateY(-2px); box-shadow: 0 18px 42px rgba(215,255,63,.22); }
+    .submit:disabled { cursor: wait; opacity: .5; transform: none; }
+
+    .stage { position: sticky; top: 18px; }
+    .stage-body { padding: 20px; }
+    .idle-screen { min-height: 390px; display: grid; align-content: space-between; }
+    .frame {
+      aspect-ratio: 9 / 16;
+      width: min(100%, 280px);
+      margin: 8px auto 24px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      display: grid;
+      place-items: center;
+      position: relative;
+      background: linear-gradient(145deg, rgba(215,255,63,.12), transparent 42%), #0b0d0a;
+      overflow: hidden;
+    }
+    .frame::before, .frame::after { content: ""; position: absolute; background: var(--line); }
+    .frame::before { width: 1px; height: 100%; left: 50%; }
+    .frame::after { width: 100%; height: 1px; top: 50%; }
+    .frame-copy { z-index: 1; text-align: center; font: 700 11px ui-monospace, Menlo, monospace; color: var(--muted); letter-spacing: .12em; }
+    .frame-copy strong { display: block; color: var(--acid); font-size: 34px; margin-bottom: 8px; }
+    .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+    .feature { padding: 12px 8px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); text-align: center; font-size: 10px; line-height: 1.45; text-transform: uppercase; }
+    .feature strong { display: block; color: var(--paper); font-size: 18px; margin-bottom: 4px; }
+
+    .process-screen, .result-screen { display: none; }
+    .processing .idle-screen, .completed .idle-screen { display: none; }
+    .processing .process-screen { display: block; }
+    .completed .result-screen { display: block; }
+    .process-visual { min-height: 360px; display: grid; place-items: center; }
+    .scanner { width: 220px; aspect-ratio: 9/16; position: relative; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: #0b0d0a; }
+    .scanner::before { content: ""; position: absolute; left: 0; right: 0; height: 3px; background: var(--acid); box-shadow: 0 0 24px var(--acid); animation: scan 2.2s ease-in-out infinite; }
+    .scanner-grid { position: absolute; inset: 0; background: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 25% 20%; opacity: .35; }
+    @keyframes scan { 0%, 100% { top: 5%; } 50% { top: 94%; } }
+
+    .progress-meta { display: flex; justify-content: space-between; gap: 18px; margin-bottom: 10px; font: 700 11px ui-monospace, Menlo, monospace; color: var(--muted); text-transform: uppercase; }
+    .progress-track { height: 12px; background: #080a07; border: 1px solid var(--line); overflow: hidden; }
+    .progress-bar { width: 0; height: 100%; background: repeating-linear-gradient(135deg, var(--acid) 0 8px, #b3d82f 8px 16px); transition: width 450ms var(--ease); }
+    .status-message { min-height: 48px; margin-top: 16px; font-size: 18px; font-weight: 800; }
+    .error { color: #ff8b73; white-space: pre-wrap; }
+
+    .result-video { width: 100%; max-height: 68vh; background: #000; border-radius: 12px; border: 1px solid var(--line); }
+    .result-head { display: flex; justify-content: space-between; align-items: start; gap: 16px; margin: 16px 0 12px; }
+    .result-head h2 { margin: 0 0 5px; font-size: 19px; }
+    .result-head p { margin: 0; color: var(--muted); font-size: 12px; }
+    .result-mode { color: var(--acid); font: 700 10px ui-monospace, Menlo, monospace; border: 1px solid rgba(215,255,63,.35); padding: 7px 9px; border-radius: 999px; white-space: nowrap; }
+    .downloads { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; margin-top: 13px; }
+    .downloads a { min-height: 45px; padding: 0 10px; display: grid; place-items: center; text-align: center; border: 1px solid var(--line); border-radius: 8px; color: var(--paper); text-decoration: none; font-size: 11px; font-weight: 800; }
+    .downloads a:first-child { background: var(--acid); color: var(--ink); border-color: var(--acid); }
+    .ai-note { display: none; margin-top: 12px; padding: 11px; border-left: 3px solid var(--orange); background: rgba(255,107,61,.08); color: #ffc2ae; font-size: 12px; line-height: 1.5; }
+
+    .timeline-panel { margin-top: 22px; display: none; }
+    .timeline-panel.visible { display: block; animation: rise .5s var(--ease) both; }
+    .timeline { padding: 20px; display: grid; gap: 10px; }
+    .beat { display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.018); }
+    .beat-no { width: 40px; aspect-ratio: 1; border: 1px solid var(--acid); color: var(--acid); display: grid; place-items: center; border-radius: 50%; font: 800 12px ui-monospace, Menlo, monospace; }
+    .beat strong { display: block; margin-bottom: 4px; font-size: 14px; }
+    .beat small { color: var(--muted); }
+    .beat-time { font: 700 11px ui-monospace, Menlo, monospace; color: var(--muted); }
+    @keyframes rise { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+
+    footer { min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--muted); border-top: 1px solid var(--line); font: 700 10px ui-monospace, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+
+    :focus-visible { outline: 2px solid var(--acid); outline-offset: 3px; }
+    @media (max-width: 980px) {
+      .hero { grid-template-columns: 1fr; }
+      .stage { position: static; }
+      h1 { font-size: clamp(64px, 17vw, 120px); }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 20px, 1440px); }
+      header { grid-template-columns: 1fr auto; min-height: 72px; }
+      .header-meta { display: none; }
+      main { padding-top: 30px; }
+      .fields { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+      .downloads { grid-template-columns: 1fr; }
+      .beat { grid-template-columns: 42px 1fr; }
+      .beat-time { grid-column: 2; }
+      footer { align-items: flex-start; flex-direction: column; padding: 22px 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到操作区</a>
+  <header class="shell">
+    <div class="brand">RE:<span>FRAME</span></div>
+    <div class="header-meta">Local video reconstruction workstation</div>
+    <div class="badge" id="systemBadge">检测中</div>
+  </header>
+
+  <main id="main" class="shell">
+    <section class="hero" aria-labelledby="pageTitle">
+      <div>
+        <div class="kicker">AI Video Reconstruction</div>
+        <h1 id="pageTitle">拆开。<br><em>重写。</em><br>再成片。</h1>
+        <p class="lede">拖入一组已有素材，系统自动拆镜、判断画面焦点、设计新叙事顺序、生成短字幕，并重渲染为 9:16 短视频成片。</p>
+
+        <form class="panel" id="jobForm">
+          <div class="panel-title"><strong>输入工作台</strong><span>01 / Material</span></div>
+          <div class="form-body">
+            <div class="dropzone" id="dropzone">
+              <input id="videos" name="videos" type="file" accept="video/*,.mkv" multiple required aria-label="选择视频素材">
+              <div>
+                <div class="drop-icon">＋</div>
+                <strong>拖入视频，或点击选择</strong>
+                <small>最多 8 个 MP4 / MOV / WebM / MKV</small>
+              </div>
+            </div>
+            <div class="file-list" id="fileList" aria-live="polite"></div>
+
+            <div class="fields">
+              <div class="field full">
+                <label for="brief">重构目标 / 产品卖点 / 新角度</label>
+                <textarea id="brief" name="brief" placeholder="例如：前三秒先展示结果；重点突出轻便、单手操作；中段用细节镜头证明；结尾给出明确行动提示。"></textarea>
+              </div>
+              <div class="field">
+                <label for="duration">目标时长（秒）</label>
+                <input id="duration" name="duration" type="number" min="3" max="60" step="1" value="15">
+              </div>
+              <div class="field">
+                <label for="style">节奏风格</label>
+                <select id="style" name="style">
+                  <option value="ugc">UGC 原生</option>
+                  <option value="product-demo">商品演示</option>
+                  <option value="fast-cut">快切冲击</option>
+                  <option value="story">故事叙事</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="language">字幕语言</label>
+                <input id="language" name="language" type="text" value="简体中文">
+              </div>
+              <div class="field">
+                <label for="quality">输出质量</label>
+                <select id="quality" name="quality">
+                  <option value="final">1080 × 1920 成片</option>
+                  <option value="preview">720 × 1280 快速预览</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>AI 视觉导演</label>
+                <div class="toggle-row">
+                  <label for="useAi">启用关键帧理解</label>
+                  <span class="switch">
+                    <input id="useAi" type="checkbox" checked>
+                    <span class="slider"></span>
+                  </span>
+                </div>
+              </div>
+              <div class="field">
+                <label for="music">背景音乐（可选）</label>
+                <div class="file-button music-input">
+                  <input id="music" name="music" type="file" accept="audio/*">
+                  <span id="musicName">选择本地音频</span>
+                </div>
+              </div>
+            </div>
+            <button class="submit" id="submitButton" type="submit">生成重构成片 →</button>
+          </div>
+        </form>
+      </div>
+
+      <aside class="panel stage" id="stage" aria-live="polite">
+        <div class="panel-title"><strong>输出监视器</strong><span id="stageLabel">Standby</span></div>
+        <div class="stage-body">
+          <div class="idle-screen">
+            <div class="frame">
+              <div class="frame-copy"><strong>9:16</strong>SMART CROP<br>SAFE FRAME</div>
+            </div>
+            <div class="feature-grid">
+              <div class="feature"><strong>01</strong>镜头拆分</div>
+              <div class="feature"><strong>02</strong>叙事重排</div>
+              <div class="feature"><strong>03</strong>成片输出</div>
+            </div>
+          </div>
+
+          <div class="process-screen">
+            <div class="process-visual"><div class="scanner"><div class="scanner-grid"></div></div></div>
+            <div class="progress-meta"><span>Render pipeline</span><span id="progressValue">0%</span></div>
+            <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+            <div class="status-message" id="statusMessage">准备处理素材…</div>
+          </div>
+
+          <div class="result-screen">
+            <video class="result-video" id="resultVideo" controls playsinline></video>
+            <div class="result-head">
+              <div><h2 id="resultTitle">重构成片</h2><p id="resultMeta"></p></div>
+              <div class="result-mode" id="resultMode">READY</div>
+            </div>
+            <div class="downloads">
+              <a id="downloadVideo" href="#">下载成片</a>
+              <a id="downloadPlan" href="#">镜头方案</a>
+              <a id="downloadManifest" href="#">处理记录</a>
+            </div>
+            <div class="ai-note" id="aiNote"></div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel timeline-panel" id="timelinePanel" aria-labelledby="timelineTitle">
+      <div class="panel-title"><strong id="timelineTitle">重构时间线</strong><span id="timelineMeta">Shot Plan</span></div>
+      <div class="timeline" id="timeline"></div>
+    </section>
+  </main>
+
+  <footer class="shell">
+    <span>RE:FRAME / LOCAL-FIRST VIDEO ENGINE</span>
+    <span>FFmpeg + OpenCV + Vision Planning</span>
+  </footer>
+
+  <script>
+    const form = document.getElementById('jobForm');
+    const videos = document.getElementById('videos');
+    const music = document.getElementById('music');
+    const musicName = document.getElementById('musicName');
+    const fileList = document.getElementById('fileList');
+    const dropzone = document.getElementById('dropzone');
+    const stage = document.getElementById('stage');
+    const stageLabel = document.getElementById('stageLabel');
+    const submitButton = document.getElementById('submitButton');
+    const progressBar = document.getElementById('progressBar');
+    const progressValue = document.getElementById('progressValue');
+    const statusMessage = document.getElementById('statusMessage');
+    const timelinePanel = document.getElementById('timelinePanel');
+    let pollTimer = null;
+
+    function readableBytes(bytes) {
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+      return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+    }
+
+    function renderFiles() {
+      const chosen = [...videos.files];
+      fileList.innerHTML = chosen.map((file, index) => `
+        <div class="file-chip"><span>${String(index + 1).padStart(2, '0')} · ${file.name}</span><span>${readableBytes(file.size)}</span></div>
+      `).join('');
+    }
+
+    videos.addEventListener('change', renderFiles);
+    music.addEventListener('change', () => { musicName.textContent = music.files[0]?.name || '选择本地音频'; });
+    ['dragenter', 'dragover'].forEach(event => dropzone.addEventListener(event, () => dropzone.classList.add('dragging')));
+    ['dragleave', 'drop'].forEach(event => dropzone.addEventListener(event, () => dropzone.classList.remove('dragging')));
+
+    async function loadStatus() {
+      try {
+        const status = await fetch('/api/status').then(response => response.json());
+        const badge = document.getElementById('systemBadge');
+        badge.textContent = status.ready ? 'Engine ready' : 'Engine missing';
+        badge.classList.toggle('offline', !status.ready);
+      } catch (_) {
+        document.getElementById('systemBadge').textContent = 'Engine offline';
+        document.getElementById('systemBadge').classList.add('offline');
+      }
+    }
+
+    function setProcessing(message = '任务已提交') {
+      stage.classList.remove('completed');
+      stage.classList.add('processing');
+      stageLabel.textContent = 'Processing';
+      submitButton.disabled = true;
+      submitButton.textContent = '正在重构…';
+      statusMessage.classList.remove('error');
+      statusMessage.textContent = message;
+      progressBar.style.width = '2%';
+      progressValue.textContent = '2%';
+      timelinePanel.classList.remove('visible');
+    }
+
+    function setFailed(message) {
+      clearTimeout(pollTimer);
+      stage.classList.add('processing');
+      stage.classList.remove('completed');
+      stageLabel.textContent = 'Failed';
+      statusMessage.classList.add('error');
+      statusMessage.textContent = message;
+      submitButton.disabled = false;
+      submitButton.textContent = '重新生成 →';
+    }
+
+    function renderTimeline(beats) {
+      const timeline = document.getElementById('timeline');
+      timeline.innerHTML = (beats || []).map((beat, index) => {
+        const duration = ((beat.end - beat.start) / (beat.speed || 1)).toFixed(1);
+        return `<article class="beat">
+          <div class="beat-no">${String(index + 1).padStart(2, '0')}</div>
+          <div><strong>${beat.caption || beat.purpose || '镜头'}</strong><small>${beat.source_id} · ${beat.purpose || 'proof'} · 焦点 ${Math.round((beat.focus_x || .5) * 100)}%</small></div>
+          <div class="beat-time">${duration}s</div>
+        </article>`;
+      }).join('');
+      document.getElementById('timelineMeta').textContent = `${(beats || []).length} shots`;
+      timelinePanel.classList.add('visible');
+    }
+
+    function setCompleted(result) {
+      clearTimeout(pollTimer);
+      stage.classList.remove('processing');
+      stage.classList.add('completed');
+      stageLabel.textContent = 'Completed';
+      submitButton.disabled = false;
+      submitButton.textContent = '再生成一个版本 →';
+      const video = document.getElementById('resultVideo');
+      video.src = result.urls.video;
+      video.load();
+      document.getElementById('resultTitle').textContent = result.title || '重构成片';
+      document.getElementById('resultMeta').textContent = `${result.output.width}×${result.output.height} · ${Number(result.output.duration).toFixed(1)}s · ${result.beats.length} 个镜头`;
+      document.getElementById('resultMode').textContent = result.planning_mode === 'ai-vision-plan' ? 'AI VISION' : 'LOCAL SMART';
+      document.getElementById('downloadVideo').href = `${result.urls.video}?download=1`;
+      document.getElementById('downloadPlan').href = `${result.urls.plan}?download=1`;
+      document.getElementById('downloadManifest').href = `${result.urls.manifest}?download=1`;
+      const aiNote = document.getElementById('aiNote');
+      if (result.ai_error) {
+        aiNote.style.display = 'block';
+        aiNote.textContent = `AI 视觉接口未完成，本次已自动使用本地智能编排：${result.ai_error}`;
+      } else {
+        aiNote.style.display = 'none';
+      }
+      renderTimeline(result.beats);
+      stage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function pollJob(jobId) {
+      try {
+        const job = await fetch(`/api/jobs/${jobId}`, { cache: 'no-store' }).then(response => response.json());
+        const progress = Math.max(0, Math.min(100, job.progress || 0));
+        progressBar.style.width = `${progress}%`;
+        progressValue.textContent = `${progress}%`;
+        statusMessage.textContent = job.message || '处理中…';
+        if (job.status === 'completed') return setCompleted(job.result);
+        if (job.status === 'failed') return setFailed(job.error || '处理失败');
+        pollTimer = setTimeout(() => pollJob(jobId), 1200);
+      } catch (error) {
+        setFailed(`无法读取任务状态：${error.message}`);
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!videos.files.length) {
+        dropzone.focus();
+        return;
+      }
+      setProcessing();
+      const data = new FormData();
+      [...videos.files].forEach(file => data.append('videos', file));
+      if (music.files[0]) data.append('music', music.files[0]);
+      data.append('brief', document.getElementById('brief').value);
+      data.append('duration', document.getElementById('duration').value);
+      data.append('style', document.getElementById('style').value);
+      data.append('language', document.getElementById('language').value);
+      data.append('quality', document.getElementById('quality').value);
+      data.append('use_ai', document.getElementById('useAi').checked ? 'true' : 'false');
+      try {
+        const response = await fetch('/api/jobs', { method: 'POST', body: data });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || '任务创建失败');
+        pollJob(payload.job_id);
+      } catch (error) {
+        setFailed(error.message);
+      }
+    });
+
+    loadStatus();
+  </script>
+</body>
+</html>
