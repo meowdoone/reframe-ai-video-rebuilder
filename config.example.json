@@ -1,0 +1,37 @@
+{
+  "asr": {
+    "backend": "auto",
+    "model": "base",
+    "language": "zh",
+    "default_text": ""
+  },
+  "llm": {
+    "api_key": null,
+    "api_base": null,
+    "model": "gpt-4o-mini",
+    "temperature": 0.7
+  },
+  "tts": {
+    "voice": "zh-CN-YunxiNeural",
+    "rate": "+0%",
+    "volume": "+0%"
+  },
+  "render": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "crop_scale": 0.95,
+    "contrast": 1.05,
+    "saturation": 1.08,
+    "brightness": 0.02,
+    "crf": 20,
+    "preset": "medium"
+  },
+  "metadata": {
+    "enabled": true,
+    "make": "Apple",
+    "model": "iPhone 15 Pro",
+    "software": "17.4.1",
+    "handler_description": "Core Media Video"
+  }
+}

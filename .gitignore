@@ -2,8 +2,11 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .venv/
+.env
+config.local.json
 .playwright-cli/
 output/playwright/
+output/reconstructed/
 workspace/jobs/*
 workspace/cli-output/
 !workspace/jobs/.gitkeep

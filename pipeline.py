@@ -1,113 +1,26 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import math
 import os
 import re
-import shutil
-import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
-
-ProgressCallback = Callable[[int, str], None]
-
-
-class PipelineError(RuntimeError):
-    pass
-
-
-def public_ai_error(error: Exception) -> str:
-    message = str(error)
-    lowered = message.lower()
-    if "401" in message or "invalid_api_key" in lowered:
-        return "OpenAI API 凭据无效（401）。"
-    if "429" in message or "rate_limit" in lowered:
-        return "OpenAI API 当前限流或额度不足（429）。"
-    message = re.sub(r"sk-[A-Za-z0-9_*.-]+", "[redacted]", message)
-    return message[:500]
-
-
-def _progress(callback: Optional[ProgressCallback], value: int, message: str) -> None:
-    if callback:
-        callback(max(0, min(100, int(value))), message)
-
-
-def _run(command: Sequence[str], label: str) -> subprocess.CompletedProcess:
-    result = subprocess.run(
-        list(command),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "unknown error").strip()
-        raise PipelineError(f"{label}失败：{detail[-1800:]}")
-    return result
-
-
-def _binary(name: str) -> str:
-    path = shutil.which(name)
-    if not path:
-        raise PipelineError(f"未找到 {name}，请先安装 FFmpeg。")
-    return path
-
-
-def probe_video(path: Path) -> Dict[str, Any]:
-    result = _run(
-        [
-            _binary("ffprobe"),
-            "-v",
-            "error",
-            "-show_streams",
-            "-show_format",
-            "-of",
-            "json",
-            str(path),
-        ],
-        "读取视频信息",
-    )
-    data = json.loads(result.stdout)
-    streams = data.get("streams", [])
-    video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
-    if not video:
-        raise PipelineError(f"{path.name} 不包含可读取的视频轨。")
-    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
-    duration = float(
-        video.get("duration")
-        or data.get("format", {}).get("duration")
-        or 0
-    )
-    frame_rate = video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1"
-    try:
-        numerator, denominator = frame_rate.split("/", 1)
-        fps = float(numerator) / max(float(denominator), 1.0)
-    except (ValueError, ZeroDivisionError):
-        fps = 0.0
-    return {
-        "duration": round(duration, 3),
-        "width": int(video.get("width") or 0),
-        "height": int(video.get("height") or 0),
-        "fps": round(fps, 3),
-        "video_codec": video.get("codec_name"),
-        "audio_codec": audio.get("codec_name") if audio else None,
-        "has_audio": bool(audio),
-        "size_bytes": int(data.get("format", {}).get("size") or path.stat().st_size),
-    }
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+from llm_module import public_ai_error
+from utils import (
+    PipelineError,
+    ProgressCallback,
+    emit_progress as _progress,
+    probe_video,
+    require_binary as _binary,
+    run_command as _run,
+    sha256_file,
+)
 
 
 def _estimate_focus(frame: np.ndarray) -> Tuple[float, float]:

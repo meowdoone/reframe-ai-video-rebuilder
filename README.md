@@ -1,67 +1,148 @@
-# RE:FRAME — AI 视频二次重构器
+# RE:FRAME — 模块化 AI 视频二次重构程序
 
-本地运行的短视频重构程序。导入一组视频后，它会自动拆镜、估计画面焦点、生成新的镜头顺序与字幕，并输出 9:16 H.264 成片。
+程序现在有两种入口：
 
-## 启动
+- `main.py`：ASR → LLM 文案重构 → edge-tts → FFmpeg 画音重构 → ExifTool 元数据的批处理主入口。
+- `app.py`：原有的本地网页拆镜、重排与字幕操作台。
 
-```bash
-python3 app.py
+## 模块结构
+
+```text
+main.py                 CLI 参数、工作流调度、批量处理、产物清单
+asr_module.py           FFmpeg 音频提取、Whisper 转写与默认文本降级
+llm_module.py           OpenAI / DeepSeek 兼容的解说词重构
+tts_module.py           edge-tts 异步拟人旁白生成
+video_renderer.py       0.95 裁切、9:16 标化、色彩调整与彻底换轨
+metadata_injector.py    ExifTool 手机参数写入与回读验证
+config.py               JSON、环境变量与模块配置
+utils.py                命令执行、视频探测、日志、清理与异常
+pipeline.py             原网页视频编辑工作流的兼容实现
 ```
 
-浏览器会自动打开 `http://127.0.0.1:8765`。
+## 安装
 
-## 当前已实现
-
-- 多视频上传与后台任务进度
-- OpenCV 镜头变化、运动强度与视觉焦点分析
-- OpenAI Responses API 多关键帧视觉规划
-- AI 不可用时的本地智能编排回退
-- 镜头选段、重排、变速、主体动态跟随与智能 9:16 裁切
-- 中文字幕烧录、原音保留、响度统一
-- 可选背景音乐混音
-- 1080×1920 成片与 720×1280 快速预览
-- 基于真实输入/输出抽帧的编辑变换报告
-- 竖屏导出规格与短视频结构发布预检
-- 成片、镜头方案、字幕与处理记录下载
-
-结果页的“编辑变换”是基于真实输入/输出抽帧、镜头重排、裁切、字幕和声音处理计算的内部指标；“发布预检”只验证导出规格和短视频结构。
-
-## AI 配置
-
-程序读取现有的 `OPENAI_API_KEY`。默认视觉模型为 `gpt-5.6-sol`，可以覆盖：
-
-```bash
-export VIDEO_REBUILDER_MODEL="gpt-5.6"
-```
-
-没有有效 API 凭据时，程序仍会完成拆镜、重排和渲染，并在结果页标记为 `LOCAL SMART`。
-
-## 命令行生成
-
-```bash
-python3 app.py render input-a.mp4 input-b.mp4 \
-  --brief "前三秒展示结果，中段证明细节，结尾行动提示" \
-  --duration 15 \
-  --style fast-cut \
-  --output-dir workspace/my-run
-```
-
-加 `--preview` 输出 720×1280；加 `--no-ai` 强制使用本地编排。
-
-## 运行依赖
-
-- Python 3.9+
-- FFmpeg / ffprobe
-- OpenCV、NumPy
-- OpenAI Python SDK（仅 AI 视觉规划需要）
+需要 Python 3.9+、FFmpeg、ffprobe 和可选的 ExifTool：
 
 ```bash
 python3 -m pip install -r requirements.txt
 ```
 
-每次任务保存在 `workspace/jobs/<任务ID>/`，包含：
+默认 ASR 使用已缓存的 Whisper `base` 模型；也可以安装 `faster-whisper` 后在配置中切换。
 
-- `reconstructed_tiktok.mp4`
-- `plan.json`
-- `manifest.json`
-- `captions.ass`
+## 单视频运行
+
+```bash
+python3 main.py input.mp4 \
+  --output-dir output/reconstructed \
+  --asr-backend whisper \
+  --asr-model base
+```
+
+处理结果包括：
+
+- `*_reconstructed.mp4`：1080×1920 H.264/AAC 成片
+- `*_transcript.json`：ASR 文本与时间戳
+- `*_narration.txt`：重构后的解说词
+- `*_manifest.json`：每一步的模式、警告、参数、校验与 SHA256
+
+## 批量处理
+
+输入多个视频或整个目录：
+
+```bash
+python3 main.py video-a.mp4 video-b.mp4 ./incoming \
+  --recursive \
+  --output-dir output/reconstructed
+```
+
+单个文件失败不会中断剩余任务；需要遇错即停时加 `--fail-fast`。
+
+## OpenAI / DeepSeek 配置
+
+复制示例配置并填入自己的参数：
+
+```bash
+cp config.example.json config.local.json
+python3 main.py input.mp4 --config config.local.json
+```
+
+也可以使用环境变量，避免把密钥写进文件：
+
+```bash
+export VIDEO_LLM_API_KEY="your-key"
+export VIDEO_LLM_API_BASE="https://api.deepseek.com/v1"
+export VIDEO_LLM_MODEL="deepseek-chat"
+python3 main.py input.mp4
+```
+
+OpenAI 兼容接口使用 `chat.completions`。如果密钥缺失、失效或接口失败，程序保留 ASR 文本继续执行，并在 manifest 中记录 `source-fallback`。
+
+## ASR 与降级
+
+- `auto`：先尝试 `faster-whisper`，再尝试 `openai-whisper`。
+- `whisper`：直接使用本机 `openai-whisper`。
+- `faster-whisper`：只使用 faster-whisper。
+- Whisper 不可用或转写失败时，使用配置里的 `asr.default_text`。
+- 没有默认文本时，ASR/LLM/TTS 标记为跳过，渲染器仍输出彻底移除原声的静音成片。
+
+也可以直接指定默认文案：
+
+```bash
+python3 main.py input.mp4 \
+  --skip-asr \
+  --default-text "前三秒先展示结果，中段说明细节，结尾给出行动提示。"
+```
+
+## TTS
+
+默认声音为 `zh-CN-YunxiNeural`：
+
+```bash
+python3 main.py input.mp4 --voice zh-CN-YunxiNeural
+```
+
+edge-tts 不可用或生成失败时不会回用原视频声音，而是输出静音音轨并记录降级状态。
+
+## 视频渲染
+
+默认执行：
+
+- 中心边缘裁切：`crop_scale=0.95`
+- 标准化：1080×1920、9:16、30 FPS
+- 色彩：`contrast=1.05`、`saturation=1.08`、`brightness=0.02`
+- 完全排除原音，只映射新旁白；没有旁白时使用静音轨
+- H.264、AAC、`yuv420p`、`+faststart`
+- 视频与旁白使用 `-shortest` 对齐
+
+## 元数据
+
+默认调用 ExifTool 写入并回读：
+
+- Make / Model / Software
+- CreateDate / ModifyDate
+- TrackCreateDate / TrackModifyDate
+- MediaCreateDate / MediaModifyDate
+
+`HandlerDescription` 是 ExifTool 只读字段，因此由 FFmpeg 在封装阶段通过 `handler_name` 写入。未安装 ExifTool 或写入失败时，只打印警告并保留已经生成的视频。
+
+关闭元数据步骤：
+
+```bash
+python3 main.py input.mp4 --no-metadata
+```
+
+## 网页操作台
+
+```bash
+python3 app.py
+```
+
+打开 `http://127.0.0.1:8765`，可继续使用多视频拆镜、镜头重排、动态裁切、字幕和背景音乐功能。
+
+## 测试
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+测试覆盖模块降级、配置解析、真实 FFmpeg 换轨渲染、批处理主工作流以及原网页视频编辑流程。

@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
 from pipeline import PipelineError, run_pipeline
+from utils import safe_filename
 
 
 ROOT = Path(__file__).resolve().parent
@@ -27,13 +28,6 @@ JOBS_DIR = ROOT / "workspace" / "jobs"
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
-
-
-def safe_filename(value: str, fallback: str) -> str:
-    name = Path(value or "").name
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
-    return stem[:120] or fallback
-
 
 class JobStore:
     def __init__(self) -> None:
