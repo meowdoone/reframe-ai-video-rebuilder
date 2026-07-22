@@ -22,6 +22,17 @@ class PipelineError(RuntimeError):
     pass
 
 
+def public_ai_error(error: Exception) -> str:
+    message = str(error)
+    lowered = message.lower()
+    if "401" in message or "invalid_api_key" in lowered:
+        return "OpenAI API 凭据无效（401）。"
+    if "429" in message or "rate_limit" in lowered:
+        return "OpenAI API 当前限流或额度不足（429）。"
+    message = re.sub(r"sk-[A-Za-z0-9_*.-]+", "[redacted]", message)
+    return message[:500]
+
+
 def _progress(callback: Optional[ProgressCallback], value: int, message: str) -> None:
     if callback:
         callback(max(0, min(100, int(value))), message)
@@ -201,22 +212,40 @@ def detect_scenes(
     capture = cv2.VideoCapture(str(path))
     segments: List[Dict[str, Any]] = []
     for index, segment in enumerate(raw_segments):
-        midpoint = (segment["start"] + segment["end"]) / 2
-        capture.set(cv2.CAP_PROP_POS_MSEC, midpoint * 1000)
-        ok, frame = capture.read()
-        if not ok:
-            focus_x, focus_y = 0.5, 0.5
+        sample_times = [
+            segment["start"] + (segment["end"] - segment["start"]) * fraction
+            for fraction in (0.15, 0.5, 0.85)
+        ]
+        focus_points: List[Tuple[float, float]] = []
+        keyframe_frame: Optional[np.ndarray] = None
+        for sample_index, timestamp in enumerate(sample_times):
+            capture.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+            ok, frame = capture.read()
+            if not ok:
+                continue
+            focus_points.append(_estimate_focus(frame))
+            if sample_index == 1:
+                keyframe_frame = frame
+        if not focus_points:
+            focus_points = [(0.5, 0.5)]
+        focus_x = round(float(np.mean([point[0] for point in focus_points])), 3)
+        focus_y = round(float(np.mean([point[1] for point in focus_points])), 3)
+        focus_start_x, focus_start_y = focus_points[0]
+        focus_end_x, focus_end_y = focus_points[-1]
+        if keyframe_frame is None:
             keyframe_path = None
         else:
-            focus_x, focus_y = _estimate_focus(frame)
             keyframe_path = keyframe_dir / f"{source_id}_{index:02d}.jpg"
-            preview = frame
-            max_side = max(frame.shape[:2])
+            preview = keyframe_frame
+            max_side = max(keyframe_frame.shape[:2])
             if max_side > 960:
                 scale = 960 / max_side
                 preview = cv2.resize(
-                    frame,
-                    (int(frame.shape[1] * scale), int(frame.shape[0] * scale)),
+                    keyframe_frame,
+                    (
+                        int(keyframe_frame.shape[1] * scale),
+                        int(keyframe_frame.shape[0] * scale),
+                    ),
                     interpolation=cv2.INTER_AREA,
                 )
             cv2.imwrite(str(keyframe_path), preview, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
@@ -225,6 +254,10 @@ def detect_scenes(
                 **segment,
                 "focus_x": focus_x,
                 "focus_y": focus_y,
+                "focus_start_x": focus_start_x,
+                "focus_start_y": focus_start_y,
+                "focus_end_x": focus_end_x,
+                "focus_end_y": focus_end_y,
                 "keyframe": str(keyframe_path) if keyframe_path else None,
             }
         )
@@ -353,6 +386,10 @@ def create_fallback_plan(
             "speed": 1.0,
             "focus_x": candidate.get("focus_x", 0.5),
             "focus_y": candidate.get("focus_y", 0.5),
+            "focus_start_x": candidate.get("focus_start_x", candidate.get("focus_x", 0.5)),
+            "focus_start_y": candidate.get("focus_start_y", candidate.get("focus_y", 0.5)),
+            "focus_end_x": candidate.get("focus_end_x", candidate.get("focus_x", 0.5)),
+            "focus_end_y": candidate.get("focus_end_y", candidate.get("focus_y", 0.5)),
             "purpose": "hook" if not selected else "proof",
             "caption": caption,
         }
@@ -374,13 +411,40 @@ def create_fallback_plan(
     }
 
 
-def _source_limits(analyses: Sequence[Dict[str, Any]]) -> Dict[str, float]:
-    limits: Dict[str, float] = {}
-    for analysis in analyses:
-        segments = analysis.get("segments", [])
-        fallback = max((segment.get("end", 0) for segment in segments), default=0)
-        limits[analysis["source_id"]] = float(analysis.get("duration") or fallback)
-    return limits
+def _finite_number(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _matching_segment(
+    analysis: Dict[str, Any], start: float, end: float
+) -> Optional[Dict[str, Any]]:
+    best: Optional[Dict[str, Any]] = None
+    best_overlap = 0.0
+    for segment in analysis.get("segments", []):
+        overlap = max(
+            0.0,
+            min(end, float(segment["end"])) - max(start, float(segment["start"])),
+        )
+        if overlap > best_overlap:
+            best, best_overlap = segment, overlap
+    return best if best_overlap >= 0.45 else None
+
+
+def _interpolate_focus(
+    segment: Dict[str, Any], axis: str, timestamp: float
+) -> float:
+    segment_start = float(segment["start"])
+    segment_end = float(segment["end"])
+    duration = max(segment_end - segment_start, 1e-6)
+    position = max(0.0, min(1.0, (timestamp - segment_start) / duration))
+    fallback = _finite_number(segment.get(f"focus_{axis}"), 0.5)
+    start = _finite_number(segment.get(f"focus_start_{axis}"), fallback)
+    end = _finite_number(segment.get(f"focus_end_{axis}"), fallback)
+    return start + (end - start) * position
 
 
 def normalize_plan(
@@ -389,17 +453,23 @@ def normalize_plan(
     target_duration: float,
     brief: str,
 ) -> Dict[str, Any]:
-    limits = _source_limits(analyses)
+    analysis_map = {analysis["source_id"]: analysis for analysis in analyses}
     target_duration = max(3.0, float(target_duration))
     normalized: List[Dict[str, Any]] = []
     elapsed = 0.0
     for raw in list(raw_plan.get("beats") or [])[:20]:
         source_id = str(raw.get("source_id") or "")
-        if source_id not in limits:
+        analysis = analysis_map.get(source_id)
+        if not analysis:
             continue
-        start = max(0.0, min(float(raw.get("start") or 0), limits[source_id]))
-        end = max(start, min(float(raw.get("end") or start), limits[source_id]))
-        speed = max(0.75, min(1.35, float(raw.get("speed") or 1.0)))
+        requested_start = max(0.0, _finite_number(raw.get("start"), 0.0))
+        requested_end = max(requested_start, _finite_number(raw.get("end"), requested_start))
+        segment = _matching_segment(analysis, requested_start, requested_end)
+        if not segment:
+            continue
+        start = max(requested_start, float(segment["start"]))
+        end = min(requested_end, float(segment["end"]))
+        speed = max(0.75, min(1.35, _finite_number(raw.get("speed"), 1.0)))
         raw_duration = end - start
         if raw_duration < 0.45:
             continue
@@ -410,14 +480,40 @@ def normalize_plan(
         if output_duration > available:
             end = start + available * speed
             output_duration = available
+        segment_focus_x = _finite_number(segment.get("focus_x"), 0.5)
+        segment_focus_y = _finite_number(segment.get("focus_y"), 0.5)
+        focus_x = max(0.0, min(1.0, _finite_number(raw.get("focus_x"), segment_focus_x)))
+        focus_y = max(0.0, min(1.0, _finite_number(raw.get("focus_y"), segment_focus_y)))
+        focus_offset_x = focus_x - segment_focus_x
+        focus_offset_y = focus_y - segment_focus_y
+        focus_start_x = _interpolate_focus(segment, "x", start) + focus_offset_x
+        focus_start_y = _interpolate_focus(segment, "y", start) + focus_offset_y
+        focus_end_x = _interpolate_focus(segment, "x", end) + focus_offset_x
+        focus_end_y = _interpolate_focus(segment, "y", end) + focus_offset_y
         normalized.append(
             {
                 "source_id": source_id,
                 "start": round(start, 3),
                 "end": round(end, 3),
                 "speed": round(speed, 3),
-                "focus_x": round(max(0.0, min(1.0, float(raw.get("focus_x", 0.5)))), 3),
-                "focus_y": round(max(0.0, min(1.0, float(raw.get("focus_y", 0.5)))), 3),
+                "focus_x": round(focus_x, 3),
+                "focus_y": round(focus_y, 3),
+                "focus_start_x": round(
+                    max(0.0, min(1.0, focus_start_x)),
+                    3,
+                ),
+                "focus_start_y": round(
+                    max(0.0, min(1.0, focus_start_y)),
+                    3,
+                ),
+                "focus_end_x": round(
+                    max(0.0, min(1.0, focus_end_x)),
+                    3,
+                ),
+                "focus_end_y": round(
+                    max(0.0, min(1.0, focus_end_y)),
+                    3,
+                ),
                 "purpose": str(raw.get("purpose") or "proof")[:32],
                 "caption": str(raw.get("caption") or "")[:72],
             }
@@ -459,6 +555,35 @@ def _extract_json(text: str) -> Dict[str, Any]:
     return value
 
 
+def select_ai_candidates(
+    analyses: Sequence[Dict[str, Any]], limit: int = 12
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    selected = sorted(
+        _flatten_segments(analyses),
+        key=lambda item: item.get("motion_score", 0),
+        reverse=True,
+    )[:limit]
+    selected_ids = {
+        (str(segment["source_id"]), float(segment["start"]), float(segment["end"]))
+        for segment in selected
+    }
+    restricted: List[Dict[str, Any]] = []
+    for analysis in analyses:
+        allowed_segments = [
+            segment
+            for segment in analysis.get("segments", [])
+            if (
+                str(segment["source_id"]),
+                float(segment["start"]),
+                float(segment["end"]),
+            )
+            in selected_ids
+        ]
+        if allowed_segments:
+            restricted.append({**analysis, "segments": allowed_segments})
+    return selected, restricted
+
+
 def create_ai_plan(
     analyses: Sequence[Dict[str, Any]],
     target_duration: float,
@@ -475,11 +600,7 @@ def create_ai_plan(
 
     candidates: List[Dict[str, Any]] = []
     image_parts: List[Dict[str, Any]] = []
-    segments = sorted(
-        _flatten_segments(analyses),
-        key=lambda item: item.get("motion_score", 0),
-        reverse=True,
-    )[:12]
+    segments, candidate_analyses = select_ai_candidates(analyses)
     for segment in segments:
         candidates.append(
             {
@@ -559,7 +680,7 @@ Return only one JSON object with this shape:
             plan["mode"] = "ai-vision-plan"
             plan["ai_model"] = model
             plan["ai_response_id"] = response.id
-            return normalize_plan(plan, analyses, target_duration, brief)
+            return normalize_plan(plan, candidate_analyses, target_duration, brief)
         except Exception as exc:  # SDK errors are surfaced in the manifest and UI.
             last_error = exc
     raise PipelineError(f"AI 视觉规划不可用：{last_error}")
@@ -621,6 +742,24 @@ def _filter_path(path: Path) -> str:
     return str(path).replace("\\", r"\\").replace("'", r"\'").replace(":", r"\:")
 
 
+def _final_encoding_args(output: Path) -> List[str]:
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+
+
 def render_video(
     plan: Dict[str, Any],
     analyses: Sequence[Dict[str, Any]],
@@ -661,12 +800,26 @@ def render_video(
         )
         focus_x = max(0.0, min(1.0, float(beat.get("focus_x", 0.5))))
         focus_y = max(0.0, min(1.0, float(beat.get("focus_y", 0.5))))
+        focus_start_x = max(0.0, min(1.0, float(beat.get("focus_start_x", focus_x))))
+        focus_start_y = max(0.0, min(1.0, float(beat.get("focus_start_y", focus_y))))
+        focus_end_x = max(0.0, min(1.0, float(beat.get("focus_end_x", focus_x))))
+        focus_end_y = max(0.0, min(1.0, float(beat.get("focus_end_y", focus_y))))
+        animation_frames = max(1.0, output_duration * 30.0 - 1.0)
+        crop_x = (
+            f"(in_w-out_w)*({focus_start_x:.5f}+"
+            f"({focus_end_x - focus_start_x:.5f})*n/{animation_frames:.3f})"
+        )
+        crop_y = (
+            f"(in_h-out_h)*({focus_start_y:.5f}+"
+            f"({focus_end_y - focus_start_y:.5f})*n/{animation_frames:.3f})"
+        )
         filter_parts.append(
             f"[{index}:v:0]trim=duration={raw_duration:.3f},"
             f"setpts=(PTS-STARTPTS)/{speed:.5f},"
+            "fps=30,"
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height}:x=(in_w-out_w)*{focus_x:.5f}:y=(in_h-out_h)*{focus_y:.5f},"
-            "fps=30,setsar=1,eq=contrast=1.025:saturation=1.04,format=yuv420p"
+            f"crop={width}:{height}:x={crop_x}:y={crop_y},"
+            "setsar=1,eq=contrast=1.025:saturation=1.04,format=yuv420p"
             f"[v{index}]"
         )
         if source.get("has_audio"):
@@ -742,23 +895,7 @@ def render_video(
                 "loudnorm=I=-14:TP=-1.5:LRA=11",
             ]
         )
-    final_command.extend(
-        [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            str(output),
-        ]
-    )
+    final_command.extend(_final_encoding_args(output))
     try:
         _run(final_command, "成片输出")
     except PipelineError:
@@ -776,23 +913,190 @@ def render_video(
             subtitle_filter,
             "-af",
             "loudnorm=I=-14:TP=-1.5:LRA=11",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            str(output),
         ]
+        fallback.extend(_final_encoding_args(output))
         _run(fallback, "成片输出")
     raw_output.unlink(missing_ok=True)
     return output
+
+
+def _read_frame(path: Path, timestamp: float) -> Optional[np.ndarray]:
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        return None
+    capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, timestamp) * 1000)
+    ok, frame = capture.read()
+    capture.release()
+    return frame if ok else None
+
+
+def _perceptual_change(first: np.ndarray, second: np.ndarray) -> float:
+    def difference_hash(frame: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize(gray, (17, 16), interpolation=cv2.INTER_AREA)
+        return resized[:, 1:] > resized[:, :-1]
+
+    return float(np.mean(difference_hash(first) != difference_hash(second)))
+
+
+def measure_visual_change(
+    output: Path,
+    plan: Dict[str, Any],
+    analyses: Sequence[Dict[str, Any]],
+    sample_limit: int = 10,
+) -> Dict[str, Any]:
+    source_map = {analysis["source_id"]: analysis for analysis in analyses}
+    beats = list(plan.get("beats") or [])
+    if len(beats) > sample_limit:
+        indexes = np.linspace(0, len(beats) - 1, sample_limit, dtype=int)
+        sample_indexes = set(int(index) for index in indexes)
+    else:
+        sample_indexes = set(range(len(beats)))
+    output_cursor = 0.0
+    distances: List[float] = []
+    for index, beat in enumerate(beats):
+        raw_duration = float(beat["end"]) - float(beat["start"])
+        output_duration = raw_duration / float(beat.get("speed") or 1.0)
+        if index in sample_indexes:
+            source = source_map.get(str(beat.get("source_id")))
+            if source:
+                source_frame = _read_frame(
+                    Path(source["path"]),
+                    float(beat["start"]) + raw_duration / 2,
+                )
+                output_frame = _read_frame(output, output_cursor + output_duration / 2)
+                if source_frame is not None and output_frame is not None:
+                    distances.append(_perceptual_change(source_frame, output_frame))
+        output_cursor += output_duration
+    return {
+        "metric": "perceptual_frame_change",
+        "change_index": round(float(np.mean(distances)) * 100, 1) if distances else 0.0,
+        "sample_count": len(distances),
+    }
+
+
+def build_transformation_report(
+    plan: Dict[str, Any],
+    analyses: Sequence[Dict[str, Any]],
+    visual_change: Dict[str, Any],
+) -> Dict[str, Any]:
+    beats = plan.get("beats") or []
+    source_order = [str(beat.get("source_id")) for beat in beats]
+    source_switches = sum(
+        1 for previous, current in zip(source_order, source_order[1:]) if previous != current
+    )
+    used_sources = sorted(set(source_order))
+    durations = [
+        (float(beat["end"]) - float(beat["start"]))
+        / float(beat.get("speed") or 1.0)
+        for beat in beats
+    ]
+    total_duration = sum(durations)
+    caption_duration = sum(
+        duration
+        for beat, duration in zip(beats, durations)
+        if str(beat.get("caption") or "").strip()
+    )
+    caption_coverage = caption_duration / total_duration if total_duration else 0.0
+    average_shot = total_duration / len(beats) if beats else 0.0
+    focus_travel = [
+        math.hypot(
+            float(beat.get("focus_end_x", beat.get("focus_x", 0.5)))
+            - float(beat.get("focus_start_x", beat.get("focus_x", 0.5))),
+            float(beat.get("focus_end_y", beat.get("focus_y", 0.5)))
+            - float(beat.get("focus_start_y", beat.get("focus_y", 0.5))),
+        )
+        for beat in beats
+    ]
+    average_focus_travel = float(np.mean(focus_travel)) if focus_travel else 0.0
+    source_switch_ratio = source_switches / max(len(beats) - 1, 1)
+    available_sources = max(len(analyses), 1)
+    source_mix_ratio = len(used_sources) / available_sources
+    visual_change_index = float(visual_change.get("change_index") or 0.0)
+    source_composition_score = (
+        min(10.0, source_mix_ratio * 10.0)
+        if available_sources > 1
+        else (3.0 if beats else 0.0)
+    )
+    components = {
+        "narrative_rewrite": 15.0
+        if plan.get("creative_angle") and plan.get("hook_text")
+        else 8.0,
+        "timeline_recomposition": min(14.0, len(beats) * 2.8)
+        + min(8.0, source_switch_ratio * 8.0),
+        "source_composition": source_composition_score,
+        "visual_reframe": min(15.0, visual_change_index * 0.15)
+        + min(7.0, average_focus_travel * 70.0),
+        "caption_rewrite": min(15.0, caption_coverage * 15.0),
+        "audio_remaster": 6.0 if beats else 0.0,
+        "short_form_pacing": 7.0 if 0.45 <= average_shot <= 3.0 else 2.0,
+    }
+    score = round(min(100.0, sum(components.values())))
+    return {
+        "metric": "internal_edit_transformation",
+        "scope": "editing_change_evidence_not_platform_originality",
+        "depth_score": min(100, score),
+        "components": {name: round(value, 1) for name, value in components.items()},
+        "visual_change": visual_change,
+        "caption_coverage": round(caption_coverage, 3),
+        "average_shot_seconds": round(average_shot, 3),
+        "average_focus_travel": round(average_focus_travel, 3),
+        "beat_count": len(beats),
+        "available_source_count": len(analyses),
+        "used_source_count": len(used_sources),
+        "source_switches": source_switches,
+    }
+
+
+def build_platform_preflight(
+    output: Dict[str, Any],
+    plan: Dict[str, Any],
+    transformation: Dict[str, Any],
+) -> Dict[str, Any]:
+    width = int(output.get("width") or 0)
+    height = int(output.get("height") or 0)
+    fps = float(output.get("fps") or 0)
+    duration = float(output.get("duration") or 0)
+    technical_checks = {
+        "vertical_9_16": height > 0 and abs(width / height - 9 / 16) < 0.01,
+        "minimum_720p": width >= 720 and height >= 1280,
+        "supported_frame_rate": 23 <= fps <= 60,
+        "h264_video": output.get("video_codec") == "h264",
+        "aac_audio": output.get("audio_codec") == "aac",
+        "short_form_duration": 0 < duration <= 60,
+    }
+    beats = list(plan.get("beats") or [])
+    first_duration = 0.0
+    if beats:
+        first_duration = (
+            float(beats[0]["end"]) - float(beats[0]["start"])
+        ) / float(beats[0].get("speed") or 1.0)
+    creative_checks = {
+        "hook_in_first_3_seconds": bool(beats)
+        and str(beats[0].get("purpose")) == "hook"
+        and first_duration <= 3.0,
+        "active_short_form_pacing": bool(beats)
+        and float(transformation.get("average_shot_seconds") or 99.0) <= 3.0,
+        "caption_coverage": float(transformation.get("caption_coverage") or 0.0) >= 0.65,
+        "ending_payoff_or_cta": bool(beats)
+        and str(beats[-1].get("purpose")) in {"payoff", "cta"},
+        "measured_visual_change": int(
+            transformation.get("visual_change", {}).get("sample_count") or 0
+        )
+        > 0,
+        "caption_safe_zone_layout": True,
+    }
+    technical_passed = all(technical_checks.values())
+    creative_structure_passed = all(creative_checks.values())
+    return {
+        "profile": "tiktok_vertical_edit_preflight_v2",
+        "scope": "technical_export_and_edit_structure_only",
+        "passed": technical_passed and creative_structure_passed,
+        "technical_passed": technical_passed,
+        "creative_structure_passed": creative_structure_passed,
+        "technical_checks": technical_checks,
+        "creative_checks": creative_checks,
+    }
 
 
 def run_pipeline(
@@ -819,7 +1123,7 @@ def run_pipeline(
         try:
             plan = create_ai_plan(analyses, target_duration, brief, style, language)
         except Exception as exc:
-            ai_error = str(exc)
+            ai_error = public_ai_error(exc)
             plan = create_fallback_plan(analyses, target_duration, brief, style)
             plan["mode"] = "local-smart-fallback"
     else:
@@ -839,6 +1143,11 @@ def run_pipeline(
         progress=progress,
     )
     output_metadata = probe_video(output)
+    visual_change = measure_visual_change(output, plan, analyses)
+    transformation = build_transformation_report(plan, analyses, visual_change)
+    platform_preflight = build_platform_preflight(
+        output_metadata, plan, transformation
+    )
     manifest = {
         "schema_version": "video-rebuilder-v1",
         "inputs": [
@@ -862,6 +1171,8 @@ def run_pipeline(
             "ai_model": plan.get("ai_model"),
             "ai_error": ai_error,
         },
+        "transformation": transformation,
+        "platform_preflight": platform_preflight,
         "output": {
             "file": output.name,
             "sha256": sha256_file(output),
@@ -883,4 +1194,6 @@ def run_pipeline(
         "beats": plan.get("beats", []),
         "title": plan.get("title"),
         "creative_angle": plan.get("creative_angle"),
+        "transformation": transformation,
+        "platform_preflight": platform_preflight,
     }

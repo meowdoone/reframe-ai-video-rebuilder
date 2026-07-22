@@ -246,7 +246,7 @@
     .result-head h2 { margin: 0 0 5px; font-size: 19px; }
     .result-head p { margin: 0; color: var(--muted); font-size: 12px; }
     .result-mode { color: var(--acid); font: 700 10px ui-monospace, Menlo, monospace; border: 1px solid rgba(215,255,63,.35); padding: 7px 9px; border-radius: 999px; white-space: nowrap; }
-    .downloads { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; margin-top: 13px; }
+    .downloads { display: grid; grid-template-columns: 1.35fr repeat(3, 1fr); gap: 8px; margin-top: 13px; }
     .downloads a { min-height: 45px; padding: 0 10px; display: grid; place-items: center; text-align: center; border: 1px solid var(--line); border-radius: 8px; color: var(--paper); text-decoration: none; font-size: 11px; font-weight: 800; }
     .downloads a:first-child { background: var(--acid); color: var(--ink); border-color: var(--acid); }
     .ai-note { display: none; margin-top: 12px; padding: 11px; border-left: 3px solid var(--orange); background: rgba(255,107,61,.08); color: #ffc2ae; font-size: 12px; line-height: 1.5; }
@@ -396,6 +396,7 @@
             <div class="downloads">
               <a id="downloadVideo" href="#">下载成片</a>
               <a id="downloadPlan" href="#">镜头方案</a>
+              <a id="downloadCaptions" href="#">字幕文件</a>
               <a id="downloadManifest" href="#">处理记录</a>
             </div>
             <div class="ai-note" id="aiNote"></div>
@@ -441,9 +442,17 @@
 
     function renderFiles() {
       const chosen = [...videos.files];
-      fileList.innerHTML = chosen.map((file, index) => `
-        <div class="file-chip"><span>${String(index + 1).padStart(2, '0')} · ${file.name}</span><span>${readableBytes(file.size)}</span></div>
-      `).join('');
+      fileList.replaceChildren();
+      chosen.forEach((file, index) => {
+        const chip = document.createElement('div');
+        chip.className = 'file-chip';
+        const name = document.createElement('span');
+        const size = document.createElement('span');
+        name.textContent = `${String(index + 1).padStart(2, '0')} · ${file.name}`;
+        size.textContent = readableBytes(file.size);
+        chip.append(name, size);
+        fileList.append(chip);
+      });
     }
 
     videos.addEventListener('change', renderFiles);
@@ -489,14 +498,26 @@
 
     function renderTimeline(beats) {
       const timeline = document.getElementById('timeline');
-      timeline.innerHTML = (beats || []).map((beat, index) => {
+      timeline.replaceChildren();
+      (beats || []).forEach((beat, index) => {
         const duration = ((beat.end - beat.start) / (beat.speed || 1)).toFixed(1);
-        return `<article class="beat">
-          <div class="beat-no">${String(index + 1).padStart(2, '0')}</div>
-          <div><strong>${beat.caption || beat.purpose || '镜头'}</strong><small>${beat.source_id} · ${beat.purpose || 'proof'} · 焦点 ${Math.round((beat.focus_x || .5) * 100)}%</small></div>
-          <div class="beat-time">${duration}s</div>
-        </article>`;
-      }).join('');
+        const article = document.createElement('article');
+        article.className = 'beat';
+        const number = document.createElement('div');
+        number.className = 'beat-no';
+        number.textContent = String(index + 1).padStart(2, '0');
+        const copy = document.createElement('div');
+        const title = document.createElement('strong');
+        const detail = document.createElement('small');
+        title.textContent = beat.caption || beat.purpose || '镜头';
+        detail.textContent = `${beat.source_id} · ${beat.purpose || 'proof'} · 焦点 ${Math.round((beat.focus_x || .5) * 100)}%`;
+        copy.append(title, detail);
+        const time = document.createElement('div');
+        time.className = 'beat-time';
+        time.textContent = `${duration}s`;
+        article.append(number, copy, time);
+        timeline.append(article);
+      });
       document.getElementById('timelineMeta').textContent = `${(beats || []).length} shots`;
       timelinePanel.classList.add('visible');
     }
@@ -512,10 +533,13 @@
       video.src = result.urls.video;
       video.load();
       document.getElementById('resultTitle').textContent = result.title || '重构成片';
-      document.getElementById('resultMeta').textContent = `${result.output.width}×${result.output.height} · ${Number(result.output.duration).toFixed(1)}s · ${result.beats.length} 个镜头`;
+      const depth = result.transformation?.depth_score;
+      const preflight = result.platform_preflight?.passed ? '发布预检通过' : '发布预检待检查';
+      document.getElementById('resultMeta').textContent = `${result.output.width}×${result.output.height} · ${Number(result.output.duration).toFixed(1)}s · ${result.beats.length} 个镜头 · 编辑变换 ${depth ?? '—'}/100（内部） · ${preflight}`;
       document.getElementById('resultMode').textContent = result.planning_mode === 'ai-vision-plan' ? 'AI VISION' : 'LOCAL SMART';
       document.getElementById('downloadVideo').href = `${result.urls.video}?download=1`;
       document.getElementById('downloadPlan').href = `${result.urls.plan}?download=1`;
+      document.getElementById('downloadCaptions').href = `${result.urls.captions}?download=1`;
       document.getElementById('downloadManifest').href = `${result.urls.manifest}?download=1`;
       const aiNote = document.getElementById('aiNote');
       if (result.ai_error) {

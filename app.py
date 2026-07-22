@@ -65,6 +65,10 @@ class JobStore:
             job = self._jobs.get(job_id)
             return dict(job) if job else None
 
+    def delete(self, job_id: str) -> None:
+        with self._lock:
+            self._jobs.pop(job_id, None)
+
 
 JOBS = JobStore()
 
@@ -200,6 +204,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             job_id, filename = parts[2], safe_filename(parts[3], "file")
+            if not re.fullmatch(r"[0-9a-f]{12}", job_id):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
             job_root = (JOBS_DIR / job_id).resolve()
             file_path = (job_root / filename).resolve()
             if job_root not in file_path.parents:
@@ -221,6 +228,8 @@ class Handler(BaseHTTPRequestHandler):
         if "multipart/form-data" not in content_type:
             self._send_json({"error": "请使用 multipart/form-data 上传"}, 400)
             return
+        job: Optional[Dict[str, Any]] = None
+        job_dir: Optional[Path] = None
         try:
             form = cgi.FieldStorage(
                 fp=self.rfile,
@@ -239,38 +248,49 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "请至少选择一个视频"}, 400)
                 return
 
+            prepared_videos = []
+            for index, field in enumerate(video_fields[:8]):
+                filename = safe_filename(field.filename, f"video_{index}.mp4")
+                if Path(filename).suffix.lower() not in VIDEO_EXTENSIONS:
+                    raise PipelineError(f"不支持的视频格式：{filename}")
+                prepared_videos.append((field, filename))
+
+            music_field = None
+            music_filename = None
+            if "music" in form and getattr(form["music"], "filename", None):
+                music_field = form["music"]
+                music_filename = safe_filename(music_field.filename, "music.mp3")
+                if Path(music_filename).suffix.lower() not in AUDIO_EXTENSIONS:
+                    raise PipelineError(f"不支持的音乐格式：{music_filename}")
+
+            quality = str(form.getfirst("quality", "final"))
+            width, height = (720, 1280) if quality == "preview" else (1080, 1920)
+            target_duration = max(
+                3.0, min(60.0, float(form.getfirst("duration", "15")))
+            )
+
             job = JOBS.create()
             job_dir = JOBS_DIR / job["id"]
             input_dir = job_dir / "inputs"
             input_dir.mkdir(parents=True, exist_ok=True)
             video_paths: List[Path] = []
-            for index, field in enumerate(video_fields[:8]):
-                filename = safe_filename(field.filename, f"video_{index}.mp4")
-                suffix = Path(filename).suffix.lower()
-                if suffix not in VIDEO_EXTENSIONS:
-                    raise PipelineError(f"不支持的视频格式：{filename}")
+            for index, (field, filename) in enumerate(prepared_videos):
                 destination = input_dir / f"{index:02d}_{filename}"
                 with destination.open("wb") as handle:
                     shutil.copyfileobj(field.file, handle, length=1024 * 1024)
                 video_paths.append(destination)
 
             music_path: Optional[Path] = None
-            if "music" in form and getattr(form["music"], "filename", None):
-                music_field = form["music"]
-                filename = safe_filename(music_field.filename, "music.mp3")
-                if Path(filename).suffix.lower() not in AUDIO_EXTENSIONS:
-                    raise PipelineError(f"不支持的音乐格式：{filename}")
-                music_path = input_dir / filename
+            if music_field is not None and music_filename:
+                music_path = input_dir / music_filename
                 with music_path.open("wb") as handle:
                     shutil.copyfileobj(music_field.file, handle, length=1024 * 1024)
 
-            quality = str(form.getfirst("quality", "final"))
-            width, height = (720, 1280) if quality == "preview" else (1080, 1920)
             settings = {
                 "video_paths": video_paths,
                 "music_path": music_path,
                 "brief": str(form.getfirst("brief", "")),
-                "target_duration": max(3.0, min(60.0, float(form.getfirst("duration", "15")))),
+                "target_duration": target_duration,
                 "style": str(form.getfirst("style", "ugc")),
                 "language": str(form.getfirst("language", "简体中文")),
                 "use_ai": str(form.getfirst("use_ai", "true")).lower() == "true",
@@ -281,6 +301,9 @@ class Handler(BaseHTTPRequestHandler):
             thread.start()
             self._send_json({"job_id": job["id"], "status": "queued"}, 202)
         except Exception as exc:
+            if job and job_dir:
+                JOBS.delete(job["id"])
+                shutil.rmtree(job_dir, ignore_errors=True)
             self._send_json({"error": str(exc)}, 400)
 
 
