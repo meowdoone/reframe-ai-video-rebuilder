@@ -5,6 +5,12 @@
 - `main.py`：ASR → LLM 文案重构 → edge-tts → FFmpeg 画音重构 → ExifTool 元数据的批处理主入口。
 - `app.py`：原有的本地网页拆镜、重排与字幕操作台。
 
+## 公开的 AI 内容发布前检查流程
+
+[打开公开流程图](https://meowdoone.github.io/reframe-ai-video-rebuilder/)：从素材来源与授权开始，逐项检查原创贡献、事实、配音、画面、AI/商业披露、音乐许可、技术格式和人工终审，并输出 PASS、REWORK 或 BLOCK。
+
+可编辑的 Mermaid 源文件位于 [`docs/ai-content-check-flow.mmd`](docs/ai-content-check-flow.mmd)。这套流程用于发布前质量与风险控制，不把哈希变化、删除水印或轻微滤镜当作原创证明。
+
 ## 模块结构
 
 ```text

@@ -1,0 +1,35 @@
+flowchart TD
+    A([开始：待发布 AI 视频]) --> B{素材来源、版权、肖像与声音授权齐全？}
+    B -- 否 --> X[BLOCK：停止发布并补齐权利证据]
+    B -- 是 --> C{存在新的观点、信息、叙事或评论价值？}
+    C -- 否 --> R1[REWORK：重新定义创作目的]
+    R1 --> C
+    C -- 是 --> D{ASR 原文、时间戳与关键事实已复核？}
+    D -- 否 --> R2[REWORK：修正转写并核对来源]
+    R2 --> D
+    D -- 是 --> E{脚本已实质重构且没有虚构事实？}
+    E -- 否 --> R3[REWORK：重做视角、结构与表达]
+    R3 --> E
+    E -- 是 --> F{人物、声音或身份模拟已获明确许可？}
+    F -- 否 --> X
+    F -- 是 --> G{画面编辑形成新的叙事与创意贡献？}
+    G -- 否 --> R4[REWORK：重做镜头、构图、字幕与节奏]
+    R4 --> G
+    G -- 是 --> H{AI 与商业披露已按内容类型完成？}
+    H -- 否 --> X
+    H -- 是 --> I{音乐、字体、图片及第三方片段许可齐全？}
+    I -- 否 --> X
+    I -- 是 --> J{9:16、编码、响度、字幕、安全区与播放完整性合格？}
+    J -- 否 --> R5[REWORK：修正技术问题]
+    R5 --> J
+    J -- 是 --> K{人工已完整观看并确认事实、社区安全、连续性与音画同步？}
+    K -- 否 --> R6[REWORK：按终审问题定点修正]
+    R6 --> K
+    K -- 是 --> P([PASS：保存证据与审核记录后发布])
+
+    classDef pass fill:#dfff00,stroke:#101310,stroke-width:3px,color:#101310;
+    classDef rework fill:#ffd7c7,stroke:#101310,stroke-width:2px,color:#101310;
+    classDef block fill:#d7342a,stroke:#101310,stroke-width:3px,color:#ffffff;
+    class P pass;
+    class R1,R2,R3,R4,R5,R6 rework;
+    class X block;
